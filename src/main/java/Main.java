@@ -9,7 +9,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-
+import java.io.ByteArrayOutputStream;
+import java.util.zip.GZIPOutputStream;
 
 public class Main {
   public static void main(String[] args) {
@@ -44,110 +45,163 @@ public class Main {
          InputStream inputStream = socket.getInputStream();
          BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
 
-      String requestLine = reader.readLine();
-      if (requestLine == null || requestLine.isEmpty()) {
-        return;
-      }
-
-      String[] parts = requestLine.split(" ");
-      if (parts.length < 2) {
-        outputStream.write("HTTP/1.1 400 Bad Request\r\n\r\n".getBytes(StandardCharsets.UTF_8));
-        return;
-      }
-
-      String method = parts[0];
-      String path = parts[1];
-      String userAgent = "";
-      int contentLength = 0;
-      boolean hasContentLength = false;
-      String line;
-
-      while ((line = reader.readLine()) != null && !line.isEmpty()) {
-        int colonIndex = line.indexOf(':');
-        if (colonIndex == -1) {
-          continue;
-        }
-
-        String headerName = line.substring(0, colonIndex).trim().toLowerCase();
-        String headerValue = line.substring(colonIndex + 1).trim();
-
-        if ("user-agent".equals(headerName)) {
-          userAgent = headerValue;
-        } else if ("content-length".equals(headerName)) {
-          try {
-            contentLength = Integer.parseInt(headerValue);
-            hasContentLength = true;
-          } catch (NumberFormatException e) {
-            outputStream.write("HTTP/1.1 400 Bad Request\r\n\r\n".getBytes(StandardCharsets.UTF_8));
-            return;
-          }
-        }
-      }
-
-      if ("POST".equals(method) && path.startsWith("/files/")) {
-        if (directory == null) {
-          outputStream.write("HTTP/1.1 404 Not Found\r\n\r\n".getBytes(StandardCharsets.UTF_8));
+      while (true){
+        
+        String requestLine = reader.readLine();
+        if (requestLine == null || requestLine.isEmpty()) {
           return;
         }
-
-        if (!hasContentLength || contentLength < 0) {
+  
+        String[] parts = requestLine.split(" ");
+        if (parts.length < 2) {
           outputStream.write("HTTP/1.1 400 Bad Request\r\n\r\n".getBytes(StandardCharsets.UTF_8));
           return;
         }
-
-        String filename = path.substring("/files/".length());
-        Path requestedPath = directory.resolve(filename).normalize();
-        Path normalizedDirectory = directory.normalize();
-
-        if (!requestedPath.startsWith(normalizedDirectory)) {
+  
+        String method = parts[0];
+        String path = parts[1];
+        String userAgent = "";
+        int contentLength = 0;
+        boolean hasContentLength = false;
+        String line;
+        String acceptEncoding = "";
+        boolean connectionClose = false;
+  
+        while ((line = reader.readLine()) != null && !line.isEmpty()) {
+          int colonIndex = line.indexOf(':');
+          if (colonIndex == -1) {
+            continue;
+          }
+  
+          String headerName = line.substring(0, colonIndex).trim().toLowerCase();
+          String headerValue = line.substring(colonIndex + 1).trim();
+  
+          if ("user-agent".equals(headerName)) {
+            userAgent = headerValue;
+          } 
+          
+          else if ("content-length".equals(headerName)) {
+            try {
+              contentLength = Integer.parseInt(headerValue);
+              hasContentLength = true;
+            } catch (NumberFormatException e) {
+              outputStream.write("HTTP/1.1 400 Bad Request\r\n\r\n".getBytes(StandardCharsets.UTF_8));
+              return;
+            }
+          }
+  
+          else if ("accept-encoding".equals(headerName)){
+            acceptEncoding = headerValue;
+          }
+          else if ("connection".equals(headerName)){
+            if ("close".equalsIgnoreCase(headerValue)){
+                connectionClose = true;
+            }
+        }
+        }
+        String connectionHeader = connectionClose ? "Connection: close\r\n" : "";
+  
+        if ("POST".equals(method) && path.startsWith("/files/")) {
+          if (directory == null) {
+            outputStream.write("HTTP/1.1 404 Not Found\r\n\r\n".getBytes(StandardCharsets.UTF_8));
+            return;
+          }
+  
+          if (!hasContentLength || contentLength < 0) {
+            outputStream.write("HTTP/1.1 400 Bad Request\r\n\r\n".getBytes(StandardCharsets.UTF_8));
+            return;
+          }
+  
+          String filename = path.substring("/files/".length());
+          Path requestedPath = directory.resolve(filename).normalize();
+          Path normalizedDirectory = directory.normalize();
+  
+          if (!requestedPath.startsWith(normalizedDirectory)) {
+            outputStream.write("HTTP/1.1 404 Not Found\r\n\r\n".getBytes(StandardCharsets.UTF_8));
+            return;
+          }
+  
+          String requestBody = readRequestBody(reader, contentLength);
+          Files.write(requestedPath, requestBody.getBytes(StandardCharsets.UTF_8));
+          outputStream.write("HTTP/1.1 201 Created\r\n\r\n".getBytes(StandardCharsets.UTF_8));
+        } 
+  
+        else if (path.equals("/")) {
+          outputStream.write(("HTTP/1.1 200 OK\r\n" +  connectionHeader + "\r\n").getBytes(StandardCharsets.UTF_8));
+        } 
+        
+        else if (path.startsWith("/echo/")) {
+          String echoString = path.substring(6);
+          String responseHeader = "HTTP/1.1 200 OK\r\n" + "Content-Type: text/plain\r\n" + connectionHeader;
+          boolean supportedGzip = false;
+          String[] encodings = acceptEncoding.split(",");
+          byte[] body = echoString.getBytes(StandardCharsets.UTF_8);
+  
+          for (String encode: encodings){
+            if ("gzip".equals(encode.trim())){
+              supportedGzip = true;
+              break;
+            }
+          }
+  
+          if (supportedGzip){
+            ByteArrayOutputStream byteOutput = new ByteArrayOutputStream();
+            GZIPOutputStream gzipOutput = new GZIPOutputStream(byteOutput);
+            gzipOutput.write(body);
+            gzipOutput.close();
+            body = byteOutput.toByteArray();
+            responseHeader += "Content-Encoding: gzip\r\n";
+          }
+          responseHeader += "Content-Length: " + body.length + "\r\n\r\n";
+          outputStream.write(responseHeader.getBytes(StandardCharsets.UTF_8));
+          outputStream.write(body);
+        } 
+        
+        else if (path.startsWith("/user-agent")) {
+          byte[] body = userAgent.getBytes(StandardCharsets.UTF_8);
+          String responseHeaders = "HTTP/1.1 200 OK\r\n" 
+                                + "Content-Type: text/plain\r\n" 
+                                + connectionHeader + "Content-Length: " 
+                                + body.length + "\r\n\r\n";
+          outputStream.write(responseHeaders.getBytes(StandardCharsets.UTF_8));
+          outputStream.write(body);
+        } 
+        
+        else if ("GET".equals(method) && path.startsWith("/files/")) {
+          if (directory == null) {
+            outputStream.write("HTTP/1.1 404 Not Found\r\n\r\n".getBytes(StandardCharsets.UTF_8));
+            return;
+          }
+  
+          String filename = path.substring("/files/".length());
+          Path requestedPath = directory.resolve(filename).normalize();
+          Path normalizedDirectory = directory.normalize();
+  
+          if (!requestedPath.startsWith(normalizedDirectory)
+              || !Files.exists(requestedPath)
+              || !Files.isRegularFile(requestedPath)) {
+            outputStream.write("HTTP/1.1 404 Not Found\r\n\r\n".getBytes(StandardCharsets.UTF_8));
+            return;
+          }
+  
+          byte[] fileContents = Files.readAllBytes(requestedPath);
+          String responseHeaders = "HTTP/1.1 200 OK\r\n"
+              + "Content-Type: application/octet-stream\r\n"
+              + "Content-Length: " + fileContents.length + "\r\n\r\n";
+          outputStream.write(responseHeaders.getBytes(StandardCharsets.UTF_8));
+          outputStream.write(fileContents);
+        } 
+  
+        else {
           outputStream.write("HTTP/1.1 404 Not Found\r\n\r\n".getBytes(StandardCharsets.UTF_8));
-          return;
         }
 
-        String requestBody = readRequestBody(reader, contentLength);
-        Files.write(requestedPath, requestBody.getBytes(StandardCharsets.UTF_8));
-        outputStream.write("HTTP/1.1 201 Created\r\n\r\n".getBytes(StandardCharsets.UTF_8));
-      } else if (path.equals("/")) {
-        outputStream.write("HTTP/1.1 200 OK\r\n\r\n".getBytes(StandardCharsets.UTF_8));
-      } else if (path.startsWith("/echo/")) {
-        String echoString = path.substring(6);
-        byte[] body = echoString.getBytes(StandardCharsets.UTF_8);
-        String responseHeaders =
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " + body.length + "\r\n\r\n";
-        outputStream.write(responseHeaders.getBytes(StandardCharsets.UTF_8));
-        outputStream.write(body);
-      } else if (path.startsWith("/user-agent")) {
-        byte[] body = userAgent.getBytes(StandardCharsets.UTF_8);
-        String responseHeaders =
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " + body.length + "\r\n\r\n";
-        outputStream.write(responseHeaders.getBytes(StandardCharsets.UTF_8));
-        outputStream.write(body);
-      } else if ("GET".equals(method) && path.startsWith("/files/")) {
-        if (directory == null) {
-          outputStream.write("HTTP/1.1 404 Not Found\r\n\r\n".getBytes(StandardCharsets.UTF_8));
-          return;
+        outputStream.flush();
+        if (connectionClose){
+          break;
         }
-
-        String filename = path.substring("/files/".length());
-        Path requestedPath = directory.resolve(filename).normalize();
-        Path normalizedDirectory = directory.normalize();
-
-        if (!requestedPath.startsWith(normalizedDirectory)
-            || !Files.exists(requestedPath)
-            || !Files.isRegularFile(requestedPath)) {
-          outputStream.write("HTTP/1.1 404 Not Found\r\n\r\n".getBytes(StandardCharsets.UTF_8));
-          return;
-        }
-
-        byte[] fileContents = Files.readAllBytes(requestedPath);
-        String responseHeaders = "HTTP/1.1 200 OK\r\n"
-            + "Content-Type: application/octet-stream\r\n"
-            + "Content-Length: " + fileContents.length + "\r\n\r\n";
-        outputStream.write(responseHeaders.getBytes(StandardCharsets.UTF_8));
-        outputStream.write(fileContents);
-      } else {
-        outputStream.write("HTTP/1.1 404 Not Found\r\n\r\n".getBytes(StandardCharsets.UTF_8));
       }
+
     } catch (IOException e) {
       System.out.println("IOException: " + e.getMessage());
     }
